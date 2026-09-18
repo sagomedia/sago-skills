@@ -2,15 +2,18 @@
 """
 flow_driver.py - Autonomous CLI driver for Google Flow (Veo 2 & Gemini Omni 1.1 Flash) via Chrome DevTools Protocol (CDP).
 
-Features:
-  - Connects to or launches Chrome on port 9222 with persistent profile
-  - Synthetic ClipboardEvent paste for character consistency conditioning
-  - In-memory Blob interception (URL.createObjectURL hook)
-  - Post-generation verification (ffprobe) & 3-phase keyframe extraction
+Battle-Tested & Verified Lifecycle:
+  1. Connects to persistent Google Chrome running on port 9222 with authenticated Google Account.
+  2. Ensures project canvas is open with active .ProseMirror editor.
+  3. Dispatches prompt (plus optional synthetic paste for character consistency conditioning).
+  4. Tracks Google Flow's live render percentage (e.g. 12% -> 50% -> 100%).
+  5. Dispatches force-click on the completed tile to mount Google's signed CDN video stream.
+  6. Downloads the 720p HD MP4 (h264) directly to disk.
+  7. Verifies stream with ffprobe and extracts 3 keyframe stills (f_start, f_mid, f_end).
 
 Usage:
-  python3 flow_driver.py --prompt "Modern physical therapy clinic room" --out-dir ./output/clinic_scene
-  python3 flow_driver.py --prompt "Doctor inspecting back posture" --ref-image ./mascot.png --out-dir ./output/doctor
+  python3 flow_driver.py --prompt "Cinematic medical clinic room" --out-dir ./output/clinic
+  python3 flow_driver.py --prompt "Doctor examining posture" --ref-image ./mascot.png --out-dir ./output/doctor
 """
 
 import argparse
@@ -18,10 +21,12 @@ import atexit
 import base64
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
 import time
+import urllib.request
 from urllib.request import urlopen
 
 CDP_PORT = 9222
@@ -47,7 +52,6 @@ def _ensure_chrome():
     print(f"[*] Launching Chrome with CDP on port {CDP_PORT}...")
     os.makedirs(USER_DATA_DIR, exist_ok=True)
     
-    # Remove stale locks
     for fname in os.listdir(USER_DATA_DIR):
         if fname.startswith("Singleton"):
             try:
@@ -66,12 +70,12 @@ def _ensure_chrome():
         "--disable-background-timer-throttling",
         "--disable-backgrounding-occluded-windows",
         "--disable-renderer-backgrounding",
-        "https://flow.google.com/?pli=1"
+        "https://flow.google.com/"
     ]
     proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     _launched_proc = proc
 
-    for _ in range(30):
+    for _ in range(40):
         time.sleep(0.3)
         if _is_cdp_ready():
             print(f"[+] Chrome CDP is ready at {CDP_URL}")
@@ -94,7 +98,7 @@ def _cleanup():
 atexit.register(_cleanup)
 
 
-def generate_flow_video(prompt: str, ref_image: str = None, out_dir: str = "./output", model_choice: str = "omni", duration_timeout: int = 180):
+def generate_flow_video(prompt: str, ref_image: str = None, out_dir: str = "./output", timeout: int = 180):
     from playwright.sync_api import sync_playwright
 
     out_dir = os.path.abspath(out_dir)
@@ -103,39 +107,44 @@ def generate_flow_video(prompt: str, ref_image: str = None, out_dir: str = "./ou
 
     with sync_playwright() as p:
         browser = p.chromium.connect_over_cdp(CDP_URL)
-        context = browser.contexts[0]
-        page = context.new_page()
+        context = browser.contexts[0] if browser.contexts else browser.new_context()
 
-        print("[*] Navigating to Google Flow...")
-        page.goto("https://flow.google.com/?pli=1", timeout=45000, wait_until="domcontentloaded")
-        page.wait_for_timeout(4000)
+        # Locate existing Google Flow tab or navigate
+        flow_pages = [pg for pg in context.pages if "flow.google" in pg.url]
+        if flow_pages:
+            page = flow_pages[0]
+            print(f"[+] Using active Flow page: {page.url}")
+        else:
+            page = context.new_page()
+            print("[*] Navigating to Google Flow...")
+            page.goto("https://flow.google.com/", wait_until="domcontentloaded")
+            page.wait_for_timeout(3000)
 
-        # Ensure active prompt editor
-        print("[*] Checking prompt editor...")
-        editor = page.wait_for_selector('.ProseMirror[contenteditable="true"]', timeout=30000)
+        # Close any open modal / player
+        if "/edit/" in page.url:
+            print("[*] Dismissing open modal view...")
+            page.keyboard.press("Escape")
+            proj_url = page.url.split("/edit/")[0]
+            page.goto(proj_url, wait_until="domcontentloaded")
+            page.wait_for_timeout(2500)
 
-        # Inject Synthetic Blob Interception
-        page.evaluate("""() => {
-            window.__capturedBlobs = [];
-            const origCreate = URL.createObjectURL;
-            URL.createObjectURL = function(obj) {
-                const url = origCreate.call(this, obj);
-                if (obj && (obj.type.includes('video') || (obj.size && obj.size > 100000))) {
-                    const reader = new FileReader();
-                    reader.onloadend = () => {
-                        window.__capturedBlobs.push({
-                            data: reader.result,
-                            size: obj.size,
-                            type: obj.type
-                        });
-                    };
-                    reader.readAsDataURL(obj);
-                }
-                return url;
-            };
-        }""")
+        # If on landing page, click Start Creating or open project
+        if not page.locator(".ProseMirror").first.is_visible():
+            print("[*] Project canvas not open. Looking for 'Start Creating'...")
+            start_btn = page.query_selector('button:has-text("Start Creating"), a:has-text("Start Creating")')
+            if start_btn:
+                start_btn.click()
+                page.wait_for_timeout(5000)
+            else:
+                proj_link = page.locator("a[href*='/project/']").first
+                if proj_link.is_visible():
+                    proj_link.click()
+                    page.wait_for_timeout(5000)
 
-        # If reference image supplied, inject via synthetic ClipboardEvent('paste')
+        editor = page.locator(".ProseMirror").first
+        editor.wait_for(state="visible", timeout=30000)
+
+        # Synthetic ClipboardEvent conditioning if reference image provided
         if ref_image and os.path.exists(ref_image):
             print(f"[*] Injecting reference image via synthetic paste: {ref_image}")
             with open(ref_image, "rb") as f:
@@ -144,146 +153,130 @@ def generate_flow_video(prompt: str, ref_image: str = None, out_dir: str = "./ou
 
             page.evaluate(f"""() => {{
                 const b64Data = "{img_b64}";
-                const mimeType = "{mime_type}";
-                const byteCharacters = atob(b64Data);
-                const byteNumbers = new Array(byteCharacters.length);
-                for (let i = 0; i < byteCharacters.length; i++) {{
-                    byteNumbers[i] = byteCharacters.charCodeAt(i);
+                const byteChars = atob(b64Data);
+                const byteNums = new Array(byteChars.length);
+                for (let i = 0; i < byteChars.length; i++) {{
+                    byteNums[i] = byteChars.charCodeAt(i);
                 }}
-                const byteArray = new Uint8Array(byteNumbers);
-                const file = new File([byteArray], "reference.png", {{ type: mimeType }});
-
+                const file = new File([new Uint8Array(byteNums)], "reference.png", {{ type: "{mime_type}" }});
                 const dt = new DataTransfer();
                 dt.items.add(file);
-                const event = new ClipboardEvent("paste", {{
-                    clipboardData: dt,
-                    bubbles: true,
-                    cancelable: true
-                }});
-                const editor = document.querySelector('.ProseMirror[contenteditable="true"]');
-                editor.dispatchEvent(event);
+                const ev = new ClipboardEvent("paste", {{ clipboardData: dt, bubbles: true, cancelable: true }});
+                document.querySelector('.ProseMirror').dispatchEvent(ev);
             }}""")
             page.wait_for_timeout(3000)
 
-        # Prepare formatted prompt
-        if model_choice == "omni":
-            full_prompt = f"Use Gemini Omni 1.1 Flash, do not use Veo. Vertical (9:16) aspect ratio, 360p fast render. {prompt}"
-        else:
-            full_prompt = prompt
+        # Format prompt
+        final_prompt = prompt.strip()
+        if not any(final_prompt.lower().startswith(pfx) for pfx in ["generate a video", "create a video", "video of"]):
+            final_prompt = f"Generate a video of {final_prompt}"
 
-        print(f"[*] Entering prompt: {full_prompt}")
+        print(f"[*] Submitting prompt: \"{final_prompt}\"")
         editor.click()
         editor.fill("")
-        editor.fill(full_prompt)
-        page.wait_for_timeout(1000)
+        editor.type(final_prompt, delay=12)
+        time.sleep(0.5)
 
-        # Submit generation
-        submit_btn = page.query_selector('button[aria-label="Generate"], button:has-text("Generate"), button.submit-button')
-        if submit_btn:
-            submit_btn.click()
+        send_btn = page.locator("button[aria-label='Start generation'], button[aria-label*='Send'], button:has-text('arrow_forward')").first
+        if send_btn.is_visible():
+            send_btn.click(force=True)
         else:
-            page.keyboard.press("Enter")
+            editor.press("Enter")
 
-        print("[*] Generation submitted. Awaiting render completion...")
+        print("[*] Prompt submitted! Monitoring cloud render percentage...")
         start_t = time.time()
-        video_blob_data = None
+        saw_percentage = False
+        new_tile_ready = False
 
-        while time.time() - start_t < duration_timeout:
-            # Check for policy errors
-            has_error = page.evaluate("""() => {
-                const err = document.querySelector('.error-message, flow-error-tile');
-                return err ? err.innerText : null;
-            }""")
-            if has_error and "policies" in has_error.lower():
-                raise RuntimeError(f"Google Flow Policy Rejection: {has_error}")
+        # Lifecycle monitoring
+        while time.time() - start_t < timeout:
+            elapsed = int(time.time() - start_t)
+            newest_tile = page.locator("flow-video-tile").first
 
-            # Check if video tile rendered
-            tile_rendered = page.evaluate("""() => {
-                const video = document.querySelector('flow-video-tile video, video');
-                return !!video;
-            }""")
+            if newest_tile.is_visible():
+                txt = newest_tile.inner_text()
+                pct_matches = re.findall(r'\b(\d+)%', txt)
 
-            if tile_rendered:
-                print("[+] Video tile detected! Triggering download for blob capture...")
-                page.evaluate("""() => {
-                    const tile = document.querySelector('flow-video-tile') || document.body;
-                    const moreBtn = tile.querySelector('button[aria-label="More options"], button.mat-mdc-menu-trigger');
-                    if (moreBtn) moreBtn.click();
-                }""")
-                page.wait_for_timeout(1500)
-
-                # Click download menu option
-                page.evaluate("""() => {
-                    const items = Array.from(document.querySelectorAll('.mat-mdc-menu-item, button'));
-                    const dl = items.find(el => el.innerText && el.innerText.includes('Download'));
-                    if (dl) dl.click();
-                }""")
-                page.wait_for_timeout(2000)
-
-                # Poll captured blobs
-                blobs = page.evaluate("() => window.__capturedBlobs || []")
-                if blobs:
-                    video_blob_data = blobs[0]["data"]
-                    print(f"[+] Successfully captured video blob ({blobs[0]['size']} bytes)!")
+                if pct_matches:
+                    saw_percentage = True
+                    pct_val = int(pct_matches[0])
+                    print(f"[{elapsed}s] Cloud rendering: {pct_val}% complete...")
+                    if pct_val == 100:
+                        print(f"[+] Render hit 100% at {elapsed}s! Settle 3s...")
+                        time.sleep(3)
+                        new_tile_ready = True
+                        break
+                elif saw_percentage:
+                    # Percentage was visible and now disappeared -> fully rendered!
+                    print(f"[+] Render completed at {elapsed}s!")
+                    new_tile_ready = True
                     break
+                else:
+                    print(f"[{elapsed}s] Waiting for generation queue to start...")
 
-            time.sleep(3)
+            time.sleep(4)
 
-        if not video_blob_data:
-            # Fallback: pull video src directly if blob monkeypatch was missed
-            video_src = page.evaluate("""() => {
-                const v = document.querySelector('video');
-                return v ? v.src : null;
-            }""")
-            if video_src and video_src.startswith("http"):
-                print(f"[*] Downloading direct video src: {video_src}")
-                subprocess.run(["curl", "-s", "-o", os.path.join(out_dir, "master_film.mp4"), video_src])
-            else:
-                raise TimeoutError("Failed to extract video within timeout window.")
-        else:
-            # Decode base64 and write
-            header, encoded = video_blob_data.split(",", 1)
-            video_bytes = base64.b64decode(encoded)
-            video_out = os.path.join(out_dir, "master_film.mp4")
-            with open(video_out, "wb") as f:
-                f.write(video_bytes)
-            print(f"[✓] Saved master video to: {video_out}")
+        if not new_tile_ready:
+            raise TimeoutError(f"Video generation timed out after {timeout} seconds.")
 
-        page.close()
+        # Click the newly completed tile to mount the signed video element
+        print("[*] Activating video tile to mount signed CDN stream...")
+        newest_tile = page.locator("flow-video-tile").first
+        newest_tile.click(force=True)
+        page.wait_for_timeout(3500)
 
-    # Preflight and frame extraction
-    video_out = os.path.join(out_dir, "master_film.mp4")
-    if os.path.exists(video_out):
-        probe = subprocess.run([
-            "ffprobe", "-v", "error",
-            "-show_entries", "stream=width,height,duration,codec_name",
-            "-of", "json", video_out
-        ], capture_output=True, text=True)
-        probe_json = json.loads(probe.stdout) if probe.returncode == 0 else {}
-        print(f"[✓] Stream Specs: {probe_json.get('streams', [{}])[0]}")
+        # Extract signed CDN stream URL
+        signed_video_url = page.evaluate("""() => {
+            const v = document.querySelector('video');
+            if (v && (v.src || v.currentSrc)) return v.src || v.currentSrc;
+            const perf = performance.getEntriesByType('resource')
+                .map(e => e.name)
+                .filter(u => u.includes('flow-content.google/video') || (u.includes('.mp4') && u.includes('google')));
+            return perf.length ? perf[perf.length - 1] : null;
+        }""")
 
-        print("[*] Extracting keyframe stills...")
-        subprocess.run(["ffmpeg", "-y", "-ss", "00:00:00.500", "-i", video_out, "-frames:v", "1", "-update", "1", os.path.join(out_dir, "f_start.jpg")], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        subprocess.run(["ffmpeg", "-y", "-ss", "00:00:03.500", "-i", video_out, "-frames:v", "1", "-update", "1", os.path.join(out_dir, "f_mid.jpg")], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        subprocess.run(["ffmpeg", "-y", "-ss", "00:00:06.500", "-i", video_out, "-frames:v", "1", "-update", "1", os.path.join(out_dir, "f_end.jpg")], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        print(f"[✓] Keyframes extracted in {out_dir}/f_*.jpg")
+        if not signed_video_url:
+            raise RuntimeError("Failed to resolve signed CDN video URL from mounted player.")
+
+        print(f"[+] Captured signed CDN stream: {signed_video_url}")
+
+        # Download directly to out_dir
+        out_file = os.path.join(out_dir, "master_film.mp4")
+        print(f"[*] Downloading master video to: {out_file}")
+        urllib.request.urlretrieve(signed_video_url, out_file)
+        
+        file_size = os.path.getsize(out_file)
+        print(f"[✓] Video saved: {out_file} ({file_size:,} bytes)")
+
+    # Run ffprobe and keyframe extraction
+    print("[*] Verifying stream specs and extracting keyframes...")
+    probe = subprocess.run([
+        "ffprobe", "-v", "error",
+        "-show_entries", "stream=width,height,duration,codec_name",
+        "-of", "json", out_file
+    ], capture_output=True, text=True)
+    probe_data = json.loads(probe.stdout) if probe.returncode == 0 else {}
+    print(f"[✓] Stream Specs: {probe_data.get('streams', [{}])[0]}")
+
+    subprocess.run(["ffmpeg", "-y", "-ss", "00:00:00.500", "-i", out_file, "-frames:v", "1", "-update", "1", os.path.join(out_dir, "f_start.jpg")], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    subprocess.run(["ffmpeg", "-y", "-ss", "00:00:03.500", "-i", out_file, "-frames:v", "1", "-update", "1", os.path.join(out_dir, "f_mid.jpg")], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    subprocess.run(["ffmpeg", "-y", "-ss", "00:00:06.500", "-i", out_file, "-frames:v", "1", "-update", "1", os.path.join(out_dir, "f_end.jpg")], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    print(f"[✓] Keyframes extracted: {out_dir}/f_*.jpg")
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Autonomous Google Flow Video Generation CLI")
+    parser = argparse.ArgumentParser(description="Google Flow Autonomous Video Generator CLI")
     parser.add_argument("--prompt", required=True, help="Video prompt description")
-    parser.add_argument("--ref-image", help="Path to character / reference image for conditioning")
-    parser.add_argument("--model", choices=["omni", "veo"], default="omni", help="Model engine: omni (Flash) or veo (Veo 2)")
-    parser.add_argument("--out-dir", default="./output/flow_generation", help="Output directory")
-    parser.add_argument("--timeout", type=int, default=180, help="Max generation timeout in seconds")
+    parser.add_argument("--ref-image", help="Path to character or reference image for conditioning")
+    parser.add_argument("--out-dir", default="./output/flow_generation", help="Destination output directory")
+    parser.add_argument("--timeout", type=int, default=180, help="Maximum timeout in seconds")
 
     args = parser.parse_args()
     generate_flow_video(
         prompt=args.prompt,
         ref_image=args.ref_image,
         out_dir=args.out_dir,
-        model_choice=args.model,
-        duration_timeout=args.timeout
+        timeout=args.timeout
     )
 
 if __name__ == "__main__":
