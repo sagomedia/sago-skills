@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+output/
+qa/
+research/
+*.mp4
+*.jpg
+*.png
+DevToolsActivePort
+Singleton*
