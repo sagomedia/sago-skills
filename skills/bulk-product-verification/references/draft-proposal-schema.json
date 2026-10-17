@@ -1,0 +1,130 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "CatalogDraftProposal",
+  "description": "Standardized draft proposal payload for staging bulk catalog products prior to database ingestion.",
+  "type": "object",
+  "required": [
+    "proposalId",
+    "batchId",
+    "sourceSku",
+    "product",
+    "asset",
+    "governance"
+  ],
+  "properties": {
+    "proposalId": {
+      "type": "string",
+      "description": "Unique proposal identifier (UUID or stable deterministic hash)."
+    },
+    "batchId": {
+      "type": "string",
+      "description": "Batch or supplier manifest identifier."
+    },
+    "sourceSku": {
+      "type": "string",
+      "description": "Original vendor or catalog SKU."
+    },
+    "canonicalSku": {
+      "type": "string",
+      "description": "Canonical cluster SKU if deduplicated, or identical to sourceSku."
+    },
+    "product": {
+      "type": "object",
+      "required": [
+        "sku",
+        "name",
+        "brand",
+        "unit",
+        "quantityStep",
+        "sellingPolicy",
+        "pricePaise",
+        "priceStatus",
+        "stock",
+        "active",
+        "verified"
+      ],
+      "properties": {
+        "sku": { "type": "string" },
+        "name": { "type": "string" },
+        "localNames": {
+          "type": "object",
+          "properties": {
+            "ta": { "type": "string" },
+            "ta-Latn": { "type": "string" }
+          }
+        },
+        "familyId": { "type": "string" },
+        "brand": { "type": "string" },
+        "specifications": {
+          "type": "object",
+          "additionalProperties": { "type": "string" }
+        },
+        "unit": { "type": "string" },
+        "quantityStep": { "type": "number", "minimum": 0.001 },
+        "sellingPolicy": {
+          "type": "object",
+          "required": ["saleMode", "cutAllowed"],
+          "properties": {
+            "saleMode": { "type": "string", "enum": ["pack", "piece", "measured"] },
+            "packContents": {
+              "type": ["object", "null"],
+              "properties": {
+                "value": { "type": "number", "minimum": 0.001 },
+                "unit": { "type": "string" }
+              },
+              "required": ["value", "unit"]
+            },
+            "cutAllowed": { "type": "boolean" },
+            "continuousLengthAvailable": { "type": ["number", "null"] }
+          }
+        },
+        "pricePaise": { "type": "integer", "enum": [0] },
+        "priceStatus": { "type": "string", "enum": ["confirm"] },
+        "stock": { "type": "null" },
+        "aliases": { "type": "array", "items": { "type": "string" } },
+        "keywords": { "type": "array", "items": { "type": "string" } },
+        "imagePath": { "type": "string" },
+        "active": { "type": "boolean", "enum": [false] },
+        "verified": { "type": "boolean", "enum": [false] }
+      }
+    },
+    "asset": {
+      "type": "object",
+      "required": ["assetId", "filePath", "sha256", "sourceType", "identityPreserved", "displayApproved"],
+      "properties": {
+        "assetId": { "type": "string" },
+        "filePath": { "type": "string" },
+        "sha256": { "type": "string" },
+        "sourceType": {
+          "type": "string",
+          "enum": ["manufacturer_photo", "supplier_photo", "curated_photo", "generated_illustration"]
+        },
+        "identityPreserved": { "type": "boolean" },
+        "displayApproved": { "type": "boolean" },
+        "exclusionReason": { "type": ["string", "null"] }
+      }
+    },
+    "governance": {
+      "type": "object",
+      "required": ["duplicateStatus", "researchSources", "unresolvedMerchantQuestions"],
+      "properties": {
+        "duplicateStatus": { "type": "string", "enum": ["unique", "confirmed_duplicate", "needs_review"] },
+        "researchSources": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "url": { "type": "string" },
+              "accessDate": { "type": "string" },
+              "fieldsSupported": { "type": "array", "items": { "type": "string" } }
+            }
+          }
+        },
+        "unresolvedMerchantQuestions": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    }
+  }
+}
