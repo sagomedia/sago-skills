@@ -51,6 +51,28 @@ A curated, battle-tested suite of agentic skills and automation CLI drivers for 
 
 ---
 
+
+### 4. `bulk-product-verification` (Bulk E-Commerce Catalog Verification & Database Staging)
+- **Path:** `skills/bulk-product-verification/`
+- **Capabilities:**
+  - Automated verification of bulk retail/e-commerce product catalogs before database ingestion.
+  - Strict schema hygiene: lowercase `snake_case` specification keys, multilingual validation (`localNames.ta`, `localNames["ta-Latn"]`).
+  - Physical selling basis & unit mechanics: decoupling pack contents from ordered unit, preventing volume-to-weight conversions, enforcing conservative cutting policies.
+  - Visual provenance audit: category matching, OCR/marking inspection against nominal dimensions, and AI hallucination detection.
+  - Search taxonomy defense: flags and sanitizes brand name bleeding in category aliases to prevent search routing hijack.
+  - Multi-batch non-destructive duplicate and physical variant reconciliation (`canonical-sku-map.json`).
+  - Zero-trust commercial defaults (`pricePaise: 0`, `priceStatus: "confirm"`, `stock: null`, `active: false`, `verified: false`).
+- **CLI Tools:**
+  ```bash
+  # Validate a catalog batch against draft schema, selling basis, and commercial honesty
+  python3 skills/bulk-product-verification/scripts/validate_catalog.py path/to/batch_folder
+
+  # Non-destructively reconcile duplicates across multiple batches
+  python3 skills/bulk-product-verification/scripts/reconcile_duplicates.py canonical-sku-map.json batch1 batch2 batch3
+  ```
+
+---
+
 ## 🛠️ Requirements & Setup
 
 - **Python 3.10+**
